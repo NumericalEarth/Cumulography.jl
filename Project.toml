@@ -1,0 +1,10 @@
+name = "Cumulography"
+uuid = "45387f75-ba3e-4038-b388-77bf2c981350"
+version = "0.1.0"
+authors = ["Gregory Wagner <gregory.leclaire.wagner@gmail.com>"]
+
+[deps]
+AtmosphericProfilesLibrary = "86bc3604-9858-485a-bdbe-831ec50de11d"
+
+[compat]
+AtmosphericProfilesLibrary = "0.1.7"
