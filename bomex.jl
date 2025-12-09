@@ -30,6 +30,8 @@ Nz = 75
 x = y = (0, 6400)
 z = (0, 3000)
 
+using Oceananigans.Operators: ∂zᶜᶜᶠ, ℑzᵃᵃᶜ
+
 grid = RectilinearGrid(arch; x, y, z,
                        size = (Nx, Ny, Nz), halo = (5, 5, 5),
                        topology = (Periodic, Periodic, Bounded))
