@@ -64,6 +64,34 @@ u★ = 0.28  # m/s
 ρu_bcs = FieldBoundaryConditions(bottom=ρu_drag_bc)
 ρv_bcs = FieldBoundaryConditions(bottom=ρv_drag_bc)
 
+# ## Large-scale subsidence
+#
+# The BOMEX case includes large-scale subsidence that advects mean profiles downward.
+# The subsidence velocity profile is prescribed by [Siebesma2003](@citet); Appendix B, Eq. B5:
+# ```math
+# w^s(z) = \begin{cases}
+#   W^s \frac{z}{z_1} & z \le z_1 \\
+#   W^s \left ( 1 - \frac{z - z_1}{z_2 - z_1} \right ) & z_1 < z \le z_2 \\
+#   0 & z > z_2
+# \end{cases}
+# ```
+# where ``W^s = -6.5 \times 10^{-3}`` m/s (note the negative sign for "subisdence"),
+# ``z_1 = 1500`` m and ``z_2 = 2100`` m.
+#
+# The subsidence velocity profile is provided by [AtmosphericProfilesLibrary](https://github.com/CliMA/AtmosphericProfilesLibrary.jl),
+
+wˢ = Field{Nothing, Nothing, Face}(grid)
+wˢ_profile = AtmosphericProfilesLibrary.Bomex_subsidence(FT)
+set!(wˢ, z -> wˢ_profile(z))
+
+# and looks like:
+
+lines(wˢ; axis = (xlabel = "wˢ (m/s)",))
+
+# We apply subsidence as a forcing term to the horizontally-averaged prognostic variables.
+# This requires computing horizontal averages at each time step and storing them in
+# fields that can be accessed by the forcing functions.
+
 @inline w_dz_ϕ(i, j, k, grid, w, ϕ) = @inbounds w[i, j, k] * ∂zᶜᶜᶠ(i, j, k, grid, ϕ)
 
 @inline function Fρu_subsidence(i, j, k, grid, clock, fields, p)
@@ -76,21 +104,70 @@ end
     return @inbounds - p.ρᵣ[i, j, k] * w_dz_V
 end
 
-wˢ = AtmosphericProfilesLibrary.Bomex_subsidence(FT)
-subsidence = SubsidenceForcing(wˢ)
+@inline function Fρθ_subsidence(i, j, k, grid, clock, fields, p)
+    w_dz_Θ = ℑzᵃᵃᶜ(i, j, k, grid, w_dz_ϕ, p.wˢ, p.θ_avg)
+    return @inbounds - p.ρᵣ[i, j, k] * w_dz_Θ
+end
+
+@inline function Fρqᵗ_subsidence(i, j, k, grid, clock, fields, p)
+    w_dz_Qᵗ = ℑzᵃᵃᶜ(i, j, k, grid, w_dz_ϕ, p.wˢ, p.qᵗ_avg)
+    return @inbounds - p.ρᵣ[i, j, k] * w_dz_Qᵗ
+end
+
+# Next, we build horizontally-averaged fields for subsidence. We suffix these `_f` for "forcing".
+# After we construct the model and simulation, we will write a callback that computes these
+# horizontal averages every time step.
+
+u_avg = Field{Nothing, Nothing, Center}(grid)
+v_avg = Field{Nothing, Nothing, Center}(grid)
+θ_avg = Field{Nothing, Nothing, Center}(grid)
+qᵗ_avg = Field{Nothing, Nothing, Center}(grid)
+
+ρᵣ = formulation.reference_state.density
+ρu_subsidence_forcing = Forcing(Fρu_subsidence, discrete_form=true, parameters=(; u_avg, wˢ, ρᵣ))
+ρv_subsidence_forcing = Forcing(Fρv_subsidence, discrete_form=true, parameters=(; v_avg, wˢ, ρᵣ))
+ρθ_subsidence_forcing = Forcing(Fρθ_subsidence, discrete_form=true, parameters=(; θ_avg, wˢ, ρᵣ))
+ρqᵗ_subsidence_forcing = Forcing(Fρqᵗ_subsidence, discrete_form=true, parameters=(; qᵗ_avg, wˢ, ρᵣ))
+
+# ## Geostrophic forcing
+#
+# The momentum equations include a Coriolis force with prescribed geostrophic wind.
+# The geostrophic wind profiles are given by [Siebesma2003](@citet); Appendix B, Eq. B6.
 
 coriolis = FPlane(f=3.76e-5)
 
-uᵍ = AtmosphericProfilesLibrary.Bomex_geostrophic_u(FT)
-vᵍ = AtmosphericProfilesLibrary.Bomex_geostrophic_v(FT)
-geostrophic = geostrophic_forcings(uᵍ, vᵍ)
+uᵍ = Field{Nothing, Nothing, Center}(grid)
+vᵍ = Field{Nothing, Nothing, Center}(grid)
+uᵍ_profile = AtmosphericProfilesLibrary.Bomex_geostrophic_u(FT)
+vᵍ_profile = AtmosphericProfilesLibrary.Bomex_geostrophic_v(FT)
+set!(uᵍ, z -> uᵍ_profile(z))
+set!(vᵍ, z -> vᵍ_profile(z))
+ρuᵍ = Field(ρᵣ * uᵍ)
+ρvᵍ = Field(ρᵣ * vᵍ)
 
-ρᵣ = formulation.reference_state.density
+@inline Fρu_geostrophic(i, j, k, grid, clock, fields, p) = @inbounds - p.f * p.ρvᵍ[i, j, k]
+@inline Fρv_geostrophic(i, j, k, grid, clock, fields, p) = @inbounds + p.f * p.ρuᵍ[i, j, k]
+
+ρu_geostrophic_forcing = Forcing(Fρu_geostrophic, discrete_form=true, parameters=(; f=coriolis.f, ρvᵍ))
+ρv_geostrophic_forcing = Forcing(Fρv_geostrophic, discrete_form=true, parameters=(; f=coriolis.f, ρuᵍ))
+
+# ## Moisture tendency (drying)
+#
+# A prescribed large-scale drying tendency removes moisture above the cloud layer
+# ([Siebesma2003](@citet); Appendix B, Eq. B4). This represents the effects of
+# advection by the large-scale circulation.
+
 drying = Field{Nothing, Nothing, Center}(grid)
 dqdt_profile = AtmosphericProfilesLibrary.Bomex_dqtdt(FT)
 set!(drying, z -> dqdt_profile(z))
 set!(drying, ρᵣ * drying)
 ρqᵗ_drying_forcing = Forcing(drying)
+
+# ## Radiative cooling
+#
+# A prescribed radiative cooling profile is applied to the thermodynamic equation
+# ([Siebesma2003](@citet); Appendix B, Eq. B3). Below the inversion, radiative cooling
+# of about 2 K/day counteracts the surface heating.
 
 Fρe_field = Field{Nothing, Nothing, Center}(grid)
 cᵖᵈ = constants.dry_air.heat_capacity
@@ -99,15 +176,28 @@ set!(Fρe_field, z -> dTdt_bomex(1, z))
 set!(Fρe_field, ρᵣ * cᵖᵈ * Fρe_field)
 ρe_radiation_forcing = Forcing(Fρe_field)
 
-ρu_forcing = (subsidence, geostrophic.ρu)
-ρv_forcing = (subsidence, geostrophic.ρv)
-ρqᵗ_forcing = (ρqᵗ_drying_forcing, subsidence)
-ρθ_forcing = subsidence
+# ## Assembling all the forcings
+#
+# We build tuples of forcings for all the variables. Note that forcing functions
+# are provided for both `ρθ` and `ρe`, which both contribute to the tendency of `ρθ`
+# in different ways. In particular, the tendency for `ρθ` is written
+#
+# ```math
+# ∂_t (ρ θ) = - ∇ ⋅ ( ρ \boldsymbol{u} θ ) + F_{ρθ} + \frac{1}{cᵖᵐ Π} F_{ρ e} + \cdots
+# ```
+#
+# where ``F_{ρ e}`` denotes the forcing function provided for `ρe` (e.g. for "energy density"),
+# ``F_{ρθ}`` denotes the forcing function provided for `ρθ`, and the ``\cdots`` denote
+# additional terms.
+
+ρu_forcing = (ρu_subsidence_forcing, ρu_geostrophic_forcing)
+ρv_forcing = (ρv_subsidence_forcing, ρv_geostrophic_forcing)
+ρqᵗ_forcing = (ρqᵗ_drying_forcing, ρqᵗ_subsidence_forcing)
+ρθ_forcing = ρθ_subsidence_forcing
 ρe_forcing = ρe_radiation_forcing
 
 forcing = (; ρu=ρu_forcing, ρv=ρv_forcing, ρθ=ρθ_forcing,
              ρe=ρe_forcing, ρqᵗ=ρqᵗ_forcing)
-nothing #hide
 
 microphysics = SaturationAdjustment(equilibrium=WarmPhaseEquilibrium())
 advection = WENO(order=9)
