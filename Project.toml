@@ -5,6 +5,13 @@ authors = ["Gregory Wagner <gregory.leclaire.wagner@gmail.com>"]
 
 [deps]
 AtmosphericProfilesLibrary = "86bc3604-9858-485a-bdbe-831ec50de11d"
+Breeze = "660aa2fb-d4c8-4359-a52c-9c057bc511da"
+Oceananigans = "9e8cae18-63c1-5223-a75c-80ca9d6e9a09"
+
+[sources]
+Breeze = {rev = "main", url = "https://github.com/NumericalEarth/Breeze.jl.git"}
 
 [compat]
 AtmosphericProfilesLibrary = "0.1.7"
+Breeze = "0.1.2"
+Oceananigans = "0.102.1"
