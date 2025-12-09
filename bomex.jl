@@ -10,6 +10,7 @@
 # It is a three dimensional field.
 
 using Breeze
+using Oceananigans
 using Oceananigans.Units
 
 using AtmosphericProfilesLibrary
