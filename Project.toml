@@ -6,6 +6,8 @@ authors = ["Gregory Wagner <gregory.leclaire.wagner@gmail.com>"]
 [deps]
 AtmosphericProfilesLibrary = "86bc3604-9858-485a-bdbe-831ec50de11d"
 Breeze = "660aa2fb-d4c8-4359-a52c-9c057bc511da"
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
 Oceananigans = "9e8cae18-63c1-5223-a75c-80ca9d6e9a09"
 
 [sources]
@@ -14,4 +16,6 @@ Breeze = {rev = "main", url = "https://github.com/NumericalEarth/Breeze.jl.git"}
 [compat]
 AtmosphericProfilesLibrary = "0.1.7"
 Breeze = "0.1.2"
+CairoMakie = "0.15.8"
+GLMakie = "0.13.8"
 Oceananigans = "0.102.1"
