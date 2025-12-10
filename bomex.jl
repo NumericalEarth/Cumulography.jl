@@ -1,36 +1,30 @@
-# This script setus up a simulation of shallow cumulus convection following the BOMEX case
-# described by Siebesma et al. (2003).
+# # Shallow cumulus convection (BOMEX)
 #
-# The "clouds" are represneted by the liquid water concentration, denoted qˡ.
-#
-# With WarmPhaseSaturationAdjustment, AtmosphereModel stores qˡ in
-#
-# model.microphysical_fields.qˡ
-# 
-# It is a three dimensional field.
+# This example simulates shallow cumulus convection following the Barbados Oceanographic
+# and Meteorological Experiment (BOMEX) intercomparison case [Siebesma2003](@cite).
+# BOMEX is a canonical test case for large eddy simulations of shallow cumulus
+# convection over a subtropical ocean.
 
 using Breeze
-using Oceananigans
+using Oceananigans: Oceananigans
 using Oceananigans.Units
 
 using AtmosphericProfilesLibrary
-using Printf
 using CairoMakie
+using CUDA
+using Printf
+using Random
 
-#####
-##### Grid and model setup
-#####
+Random.seed!(938)
+Oceananigans.defaults.FloatType = Float32
 
-Oceananigans.defaults.FloatType = Float32 # will speed things up esp on GPU
-arch = CPU()
+arch = GPU()
+Nx = Ny = 1024
+Nz = 300
 
-Nx = Ny = 32
-Nz = 75
-
-x = y = (0, 6400)
+#x = y = (0, 6400)
+x = y = (0, 6400 * 2)
 z = (0, 3000)
-
-using Oceananigans.Operators: ∂zᶜᶜᶠ, ℑzᵃᵃᶜ
 
 grid = RectilinearGrid(arch; x, y, z,
                        size = (Nx, Ny, Nz), halo = (5, 5, 5),
@@ -66,92 +60,15 @@ u★ = 0.28  # m/s
 ρu_bcs = FieldBoundaryConditions(bottom=ρu_drag_bc)
 ρv_bcs = FieldBoundaryConditions(bottom=ρv_drag_bc)
 
-# ## Large-scale subsidence
-#
-# The BOMEX case includes large-scale subsidence that advects mean profiles downward.
-# The subsidence velocity profile is prescribed by [Siebesma2003](@citet); Appendix B, Eq. B5:
-# ```math
-# w^s(z) = \begin{cases}
-#   W^s \frac{z}{z_1} & z \le z_1 \\
-#   W^s \left ( 1 - \frac{z - z_1}{z_2 - z_1} \right ) & z_1 < z \le z_2 \\
-#   0 & z > z_2
-# \end{cases}
-# ```
-# where ``W^s = -6.5 \times 10^{-3}`` m/s (note the negative sign for "subisdence"),
-# ``z_1 = 1500`` m and ``z_2 = 2100`` m.
-#
-# The subsidence velocity profile is provided by [AtmosphericProfilesLibrary](https://github.com/CliMA/AtmosphericProfilesLibrary.jl),
-
 wˢ = Field{Nothing, Nothing, Face}(grid)
 wˢ_profile = AtmosphericProfilesLibrary.Bomex_subsidence(FT)
 set!(wˢ, z -> wˢ_profile(z))
+subsidence = SubsidenceForcing(wˢ)
 
-# and looks like:
 
-lines(wˢ; axis = (xlabel = "wˢ (m/s)",))
-
-# We apply subsidence as a forcing term to the horizontally-averaged prognostic variables.
-# This requires computing horizontal averages at each time step and storing them in
-# fields that can be accessed by the forcing functions.
-
-@inline w_dz_ϕ(i, j, k, grid, w, ϕ) = @inbounds w[i, j, k] * ∂zᶜᶜᶠ(i, j, k, grid, ϕ)
-
-@inline function Fρu_subsidence(i, j, k, grid, clock, fields, p)
-    w_dz_U = ℑzᵃᵃᶜ(i, j, k, grid, w_dz_ϕ, p.wˢ, p.u_avg)
-    return @inbounds - p.ρᵣ[i, j, k] * w_dz_U
-end
-
-@inline function Fρv_subsidence(i, j, k, grid, clock, fields, p)
-    w_dz_V = ℑzᵃᵃᶜ(i, j, k, grid, w_dz_ϕ, p.wˢ, p.v_avg)
-    return @inbounds - p.ρᵣ[i, j, k] * w_dz_V
-end
-
-@inline function Fρθ_subsidence(i, j, k, grid, clock, fields, p)
-    w_dz_Θ = ℑzᵃᵃᶜ(i, j, k, grid, w_dz_ϕ, p.wˢ, p.θ_avg)
-    return @inbounds - p.ρᵣ[i, j, k] * w_dz_Θ
-end
-
-@inline function Fρqᵗ_subsidence(i, j, k, grid, clock, fields, p)
-    w_dz_Qᵗ = ℑzᵃᵃᶜ(i, j, k, grid, w_dz_ϕ, p.wˢ, p.qᵗ_avg)
-    return @inbounds - p.ρᵣ[i, j, k] * w_dz_Qᵗ
-end
-
-# Next, we build horizontally-averaged fields for subsidence. We suffix these `_f` for "forcing".
-# After we construct the model and simulation, we will write a callback that computes these
-# horizontal averages every time step.
-
-u_avg = Field{Nothing, Nothing, Center}(grid)
-v_avg = Field{Nothing, Nothing, Center}(grid)
-θ_avg = Field{Nothing, Nothing, Center}(grid)
-qᵗ_avg = Field{Nothing, Nothing, Center}(grid)
-
-ρᵣ = formulation.reference_state.density
-ρu_subsidence_forcing = Forcing(Fρu_subsidence, discrete_form=true, parameters=(; u_avg, wˢ, ρᵣ))
-ρv_subsidence_forcing = Forcing(Fρv_subsidence, discrete_form=true, parameters=(; v_avg, wˢ, ρᵣ))
-ρθ_subsidence_forcing = Forcing(Fρθ_subsidence, discrete_form=true, parameters=(; θ_avg, wˢ, ρᵣ))
-ρqᵗ_subsidence_forcing = Forcing(Fρqᵗ_subsidence, discrete_form=true, parameters=(; qᵗ_avg, wˢ, ρᵣ))
-
-# ## Geostrophic forcing
-#
-# The momentum equations include a Coriolis force with prescribed geostrophic wind.
-# The geostrophic wind profiles are given by [Siebesma2003](@citet); Appendix B, Eq. B6.
-
-coriolis = FPlane(f=3.76e-5)
-
-uᵍ = Field{Nothing, Nothing, Center}(grid)
-vᵍ = Field{Nothing, Nothing, Center}(grid)
-uᵍ_profile = AtmosphericProfilesLibrary.Bomex_geostrophic_u(FT)
-vᵍ_profile = AtmosphericProfilesLibrary.Bomex_geostrophic_v(FT)
-set!(uᵍ, z -> uᵍ_profile(z))
-set!(vᵍ, z -> vᵍ_profile(z))
-ρuᵍ = Field(ρᵣ * uᵍ)
-ρvᵍ = Field(ρᵣ * vᵍ)
-
-@inline Fρu_geostrophic(i, j, k, grid, clock, fields, p) = @inbounds - p.f * p.ρvᵍ[i, j, k]
-@inline Fρv_geostrophic(i, j, k, grid, clock, fields, p) = @inbounds + p.f * p.ρuᵍ[i, j, k]
-
-ρu_geostrophic_forcing = Forcing(Fρu_geostrophic, discrete_form=true, parameters=(; f=coriolis.f, ρvᵍ))
-ρv_geostrophic_forcing = Forcing(Fρv_geostrophic, discrete_form=true, parameters=(; f=coriolis.f, ρuᵍ))
+uᵍ = AtmosphericProfilesLibrary.Bomex_geostrophic_u(FT)
+vᵍ = AtmosphericProfilesLibrary.Bomex_geostrophic_v(FT)
+geostrophic = geostrophic_forcings(z -> uᵍ(z), z -> vᵍ(z))
 
 # ## Moisture tendency (drying)
 #
@@ -159,17 +76,12 @@ set!(vᵍ, z -> vᵍ_profile(z))
 # ([Siebesma2003](@citet); Appendix B, Eq. B4). This represents the effects of
 # advection by the large-scale circulation.
 
+ρᵣ = formulation.reference_state.density
 drying = Field{Nothing, Nothing, Center}(grid)
 dqdt_profile = AtmosphericProfilesLibrary.Bomex_dqtdt(FT)
 set!(drying, z -> dqdt_profile(z))
 set!(drying, ρᵣ * drying)
 ρqᵗ_drying_forcing = Forcing(drying)
-
-# ## Radiative cooling
-#
-# A prescribed radiative cooling profile is applied to the thermodynamic equation
-# ([Siebesma2003](@citet); Appendix B, Eq. B3). Below the inversion, radiative cooling
-# of about 2 K/day counteracts the surface heating.
 
 Fρe_field = Field{Nothing, Nothing, Center}(grid)
 cᵖᵈ = constants.dry_air.heat_capacity
@@ -178,38 +90,24 @@ set!(Fρe_field, z -> dTdt_bomex(1, z))
 set!(Fρe_field, ρᵣ * cᵖᵈ * Fρe_field)
 ρe_radiation_forcing = Forcing(Fρe_field)
 
-# ## Assembling all the forcings
-#
-# We build tuples of forcings for all the variables. Note that forcing functions
-# are provided for both `ρθ` and `ρe`, which both contribute to the tendency of `ρθ`
-# in different ways. In particular, the tendency for `ρθ` is written
-#
-# ```math
-# ∂_t (ρ θ) = - ∇ ⋅ ( ρ \boldsymbol{u} θ ) + F_{ρθ} + \frac{1}{cᵖᵐ Π} F_{ρ e} + \cdots
-# ```
-#
-# where ``F_{ρ e}`` denotes the forcing function provided for `ρe` (e.g. for "energy density"),
-# ``F_{ρθ}`` denotes the forcing function provided for `ρθ`, and the ``\cdots`` denote
-# additional terms.
-
-ρu_forcing = (ρu_subsidence_forcing, ρu_geostrophic_forcing)
-ρv_forcing = (ρv_subsidence_forcing, ρv_geostrophic_forcing)
-ρqᵗ_forcing = (ρqᵗ_drying_forcing, ρqᵗ_subsidence_forcing)
-ρθ_forcing = ρθ_subsidence_forcing
+ρu_forcing = (subsidence, geostrophic.ρu)
+ρv_forcing = (subsidence, geostrophic.ρv)
+ρqᵗ_forcing = (ρqᵗ_drying_forcing, subsidence)
+ρθ_forcing = subsidence
 ρe_forcing = ρe_radiation_forcing
 
 forcing = (; ρu=ρu_forcing, ρv=ρv_forcing, ρθ=ρθ_forcing,
              ρe=ρe_forcing, ρqᵗ=ρqᵗ_forcing)
 
+coriolis = FPlane(f=3.76e-5)
 microphysics = SaturationAdjustment(equilibrium=WarmPhaseEquilibrium())
-advection = WENO(order=9)
+momentum_advection = WENO(order=5)
+scalar_advection = (; ρθ=WENO(order=5), ρqᵗ = WENO(order=3))
+#scalar_advection = WENO(order=3)
 
-model = AtmosphereModel(grid; formulation, coriolis, microphysics, advection, forcing,
+model = AtmosphereModel(grid; formulation, coriolis, microphysics, forcing,
+                        momentum_advection, scalar_advection,
                         boundary_conditions = (ρθ=ρθ_bcs, ρqᵗ=ρqᵗ_bcs, ρu=ρu_bcs, ρv=ρv_bcs))
-
-#####
-##### Initial conditions
-#####
 
 FT = eltype(grid)
 θˡⁱ₀ = AtmosphericProfilesLibrary.Bomex_θ_liq_ice(FT)
@@ -223,9 +121,9 @@ cᵖᵈ = constants.dry_air.heat_capacity
 p₀ = reference_state.base_pressure
 χ = (p₀ / 1e5)^(Rᵈ/  cᵖᵈ)
 
-δθ = 0.1     # K
-δqᵗ = 2.5e-5 # kg/kg
-zδ = 1600    # m
+δθ = 0.1      # K
+δqᵗ = 2.5e-5  # kg/kg
+zδ = 1600     # m
 
 ϵ() = rand() - 1/2
 θᵢ(x, y, z) = χ * θˡⁱ₀(z) + δθ  * ϵ() * (z < zδ)
@@ -234,12 +132,8 @@ uᵢ(x, y, z) = u₀(z)
 
 set!(model, θ=θᵢ, qᵗ=qᵢ, u=uᵢ)
 
-##### 
-##### Simulation
-##### 
-
-simulation = Simulation(model; Δt=10, stop_time=1hour)
-conjure_time_step_wizard!(simulation, cfl=0.7)
+simulation = Simulation(model; Δt=1, stop_time=2hour)
+conjure_time_step_wizard!(simulation, cfl=0.5, IterationInterval(3))
 
 θ = liquid_ice_potential_temperature(model)
 qˡ = model.microphysical_fields.qˡ
@@ -248,6 +142,8 @@ qᵛ = model.microphysical_fields.qᵛ
 u_avg = Field(Average(model.velocities.u, dims=(1, 2)))
 v_avg = Field(Average(model.velocities.v, dims=(1, 2)))
 
+wallclock = Ref(time_ns())
+
 function progress(sim)
     compute!(u_avg)
     compute!(v_avg)
@@ -255,26 +151,98 @@ function progress(sim)
     qᵗmax = maximum(sim.model.specific_moisture)
     umax = maximum(abs, u_avg)
     vmax = maximum(abs, v_avg)
+    elapsed = 1e-9 * (time_ns() - wallclock[])
 
-    msg = @sprintf("Iter: %d, t: %s, Δt: %s, max|ū|: (%.2e, %.2e), max(qᵗ): %.2e, max(qˡ): %.2e",
-                   iteration(sim), prettytime(sim), prettytime(sim.Δt),
+    msg = @sprintf("Iter: % 5d, t: % 14s, Δt: % 14s, wall time: % 14s, max|ū|: (%.2e, %.2e), max(qᵗ): %.2e, max(qˡ): %.2e",
+                   iteration(sim), prettytime(sim), prettytime(sim.Δt), prettytime(elapsed),
                    umax, vmax, qᵗmax, qˡmax)
     @info msg
+
+    wallclock[] = time_ns()
+
     return nothing
 end
 
 add_callback!(simulation, progress, IterationInterval(100))
 
-##### 
-##### Output
-##### 
+outputs = merge(model.velocities, model.tracers, (; θ, qˡ, qᵛ))
+averaged_outputs = NamedTuple(name => Average(outputs[name], dims=(1, 2)) for name in keys(outputs))
 
-outputs = merge(model.velocities, (; θ, qˡ, qᵛ))
+filename_3d = "bomex.jld2"
+simulation.output_writers[:fields] = JLD2Writer(model, (; qˡ); filename=filename_3d,
+                                                schedule = TimeInterval(30minutes),
+                                                overwrite_existing = true)
 
-simulation.output_writers[:cloud] = JLD2Writer(model, outputs;
-                                               filename = "bomex.jld2",
-                                               schedule = TimeInterval(30minutes),
-                                               overwrite_existing = true)
+filename = "bomex_averages.jld2"
+simulation.output_writers[:averages] = JLD2Writer(model, averaged_outputs; filename,
+                                                  schedule = AveragedTimeInterval(1hour),
+                                                  overwrite_existing = true)
+
+# Output horizontal slices at z = 600 m for animation
+# Find the k-index closest to z = 600 m
+z = Oceananigans.Grids.znodes(grid, Center())
+k = searchsortedfirst(z, 800)
+@info "Saving slices at z = $(z[k]) m (k = $k)"
+
+u, v, w = model.velocities
+slice_fields = (; w, qˡ)
+slice_outputs = (
+    wxy = view(w, :, :, k),
+    qˡxy = view(qˡ, :, :, k),
+    wxz = view(w, :, 1, :),
+    qˡxz = view(qˡ, :, 1, :),
+)
+
+simulation.output_writers[:slices] = JLD2Writer(model, slice_outputs;
+                                                filename = "bomex_slices.jld2",
+                                                schedule = TimeInterval(30seconds),
+                                                overwrite_existing = true)
 
 @info "Running BOMEX simulation..."
 run!(simulation)
+
+# ## Animation of horizontal slices
+#
+# We create an animation showing the evolution of vertical velocity and liquid
+# water at z = 800 m, which is near the cloud base level.
+
+wxz_ts = FieldTimeSeries("bomex_slices.jld2", "wxz")
+qˡxz_ts = FieldTimeSeries("bomex_slices.jld2", "qˡxz")
+wxy_ts = FieldTimeSeries("bomex_slices.jld2", "wxy")
+qˡxy_ts = FieldTimeSeries("bomex_slices.jld2", "qˡxy")
+
+times = wxz_ts.times
+Nt = length(times)
+
+# Create animation
+slices_fig = Figure(size=(800, 1200), fontsize=14)
+axwxz = Axis(slices_fig[1, 2], aspect=2, xlabel="x (m)", ylabel="z (m)", title="Vertical velocity w")
+axqxz = Axis(slices_fig[1, 3], aspect=2, xlabel="x (m)", ylabel="z (m)", title="Liquid water qˡ")
+axwxy = Axis(slices_fig[2, 2], aspect=1, xlabel="x (m)", ylabel="y (m)")
+axqxy = Axis(slices_fig[2, 3], aspect=1, xlabel="x (m)", ylabel="y (m)")
+
+# Determine color limits from the data
+wlim= maximum(abs, wxz_ts) /  2
+qˡlim= maximum(qˡxz_ts) / 2 
+
+n = Observable(1)
+wxz_n = @lift wxz_ts[$n]
+qˡxz_n = @lift qˡxz_ts[$n]
+wxy_n = @lift wxy_ts[$n]
+qˡxy_n = @lift qˡxy_ts[$n]
+title_text = @lift "BOMEX slices at t = " * prettytime(times[$n])
+
+hmw = heatmap!(axwxz, wxz_n, colormap=:balance, colorrange=(-wlim, wlim))
+hmq = heatmap!(axqxz, qˡxz_n, colormap=:dense, colorrange=(0, qˡlim))
+hmw = heatmap!(axwxy, wxy_n, colormap=:balance, colorrange=(-wlim, wlim))
+hmq = heatmap!(axqxy, qˡxy_n, colormap=:dense, colorrange=(0, qˡlim))
+
+Colorbar(slices_fig[1:2, 1], hmw, label="w (m/s)", flipaxis=false)
+Colorbar(slices_fig[1:2, 4], hmq, label="qˡ (kg/kg)")
+
+slices_fig[0, :] = Label(slices_fig, title_text, fontsize=18, tellwidth=false)
+
+# Record animation
+CairoMakie.record(slices_fig, "bomex_slices.mp4", 1:Nt, framerate=10) do nn
+    n[] = nn
+end
